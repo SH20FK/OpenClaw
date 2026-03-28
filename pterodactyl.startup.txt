@@ -1,0 +1,5 @@
+JS_FILE=app/index.js
+
+If your panel asks only for startup command, use:
+
+/usr/local/bin/node /home/container/app/index.js
