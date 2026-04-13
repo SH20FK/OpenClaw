@@ -1,13 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
-
-async function writeJsonAtomic(filePath, data) {
-  await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
-}
+import { createWriteQueue, loadJsonFile, writeTextAtomic } from "./store-utils.js";
 
 function normalizeJob(job) {
   return {
@@ -31,24 +23,21 @@ export class JobStore {
   constructor(filePath) {
     this.filePath = filePath;
     this.jobs = [];
+    this.enqueueWrite = createWriteQueue();
   }
 
   async load() {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      this.jobs = Array.isArray(parsed) ? parsed.map(normalizeJob) : [];
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        await this.save();
-        return;
-      }
-      throw error;
+    const { data, exists, recovered } = await loadJsonFile(this.filePath, []);
+    this.jobs = Array.isArray(data) ? data.map(normalizeJob) : [];
+
+    if (!exists || recovered) {
+      await this.save();
     }
   }
 
   async save() {
-    await writeJsonAtomic(this.filePath, this.jobs);
+    const snapshot = `${JSON.stringify(this.jobs, null, 2)}\n`;
+    await this.enqueueWrite(() => writeTextAtomic(this.filePath, snapshot));
   }
 
   list() {
@@ -101,6 +90,52 @@ export class JobStore {
 
   async markFailed(jobId, error) {
     return this.update(jobId, { status: "failed", error });
+  }
+
+  async claimForDevice(jobId, deviceId) {
+    const index = this.jobs.findIndex((job) => job.id === jobId);
+    if (index === -1) {
+      return null;
+    }
+
+    const current = this.jobs[index];
+    if (current.deviceId !== deviceId || current.status !== "approved") {
+      return null;
+    }
+
+    const next = normalizeJob({
+      ...current,
+      status: "running",
+      updatedAt: new Date().toISOString(),
+    });
+
+    this.jobs[index] = next;
+    await this.save();
+    return next;
+  }
+
+  async reportForDevice(jobId, deviceId, input) {
+    const index = this.jobs.findIndex((job) => job.id === jobId);
+    if (index === -1) {
+      return null;
+    }
+
+    const current = this.jobs[index];
+    if (current.deviceId !== deviceId || !["approved", "running"].includes(current.status)) {
+      return null;
+    }
+
+    const next = normalizeJob({
+      ...current,
+      status: input.status === "applied" ? "applied" : "failed",
+      transactionId: input.status === "applied" ? input.transactionId || "" : "",
+      error: input.status === "applied" ? "" : input.error || "unknown error",
+      updatedAt: new Date().toISOString(),
+    });
+
+    this.jobs[index] = next;
+    await this.save();
+    return next;
   }
 
   listForCompanion(deviceId) {

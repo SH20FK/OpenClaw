@@ -1,12 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-
-async function writeJsonAtomic(filePath, data) {
-  await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
-}
+import { createWriteQueue, loadJsonFile, writeTextAtomic } from "./store-utils.js";
 
 function normalizeHistory(history) {
   if (!Array.isArray(history)) {
@@ -63,26 +55,24 @@ export class SessionStore {
   constructor(filePath) {
     this.filePath = filePath;
     this.sessions = new Map();
+    this.enqueueWrite = createWriteQueue();
   }
 
   async load() {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      for (const [userId, value] of Object.entries(parsed)) {
-        this.sessions.set(String(userId), normalizeSession(value));
-      }
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        await this.save();
-        return;
-      }
-      throw error;
+    const { data, exists, recovered } = await loadJsonFile(this.filePath, {});
+
+    for (const [userId, value] of Object.entries(data || {})) {
+      this.sessions.set(String(userId), normalizeSession(value));
+    }
+
+    if (!exists || recovered) {
+      await this.save();
     }
   }
 
   async save() {
-    await writeJsonAtomic(this.filePath, Object.fromEntries(this.sessions.entries()));
+    const snapshot = `${JSON.stringify(Object.fromEntries(this.sessions.entries()), null, 2)}\n`;
+    await this.enqueueWrite(() => writeTextAtomic(this.filePath, snapshot));
   }
 
   get(userId) {

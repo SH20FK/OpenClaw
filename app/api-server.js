@@ -15,7 +15,17 @@ async function readJson(request) {
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const error = new Error("invalid_json");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 function pathParts(requestUrl) {
@@ -79,25 +89,19 @@ export function createApiServer(deps) {
         }
 
         if (request.method === "POST" && parts[2] === "jobs" && parts[3] && parts[4] === "claim") {
-          const job = jobStore.get(parts[3]);
-          if (!job || job.deviceId !== device.id || job.status !== "approved") {
+          const updated = await jobStore.claimForDevice(parts[3], device.id);
+          if (!updated) {
             return json(response, 404, { error: "job_not_found" });
           }
-
-          const updated = await jobStore.markRunning(job.id);
           return json(response, 200, { ok: true, job: updated });
         }
 
         if (request.method === "POST" && parts[2] === "jobs" && parts[3] && parts[4] === "result") {
           const body = await readJson(request);
-          const job = jobStore.get(parts[3]);
-          if (!job || job.deviceId !== device.id) {
+          const next = await jobStore.reportForDevice(parts[3], device.id, body);
+          if (!next) {
             return json(response, 404, { error: "job_not_found" });
           }
-
-          const next = body.status === "applied"
-            ? await jobStore.markApplied(job.id, body.transactionId || "")
-            : await jobStore.markFailed(job.id, body.error || "unknown error");
 
           return json(response, 200, { ok: true, job: next });
         }
@@ -114,6 +118,9 @@ export function createApiServer(deps) {
 
       return json(response, 404, { error: "not_found" });
     } catch (error) {
+      if (error?.statusCode) {
+        return json(response, error.statusCode, { error: error.message || String(error) });
+      }
       return json(response, 500, { error: error.message || String(error) });
     }
   });

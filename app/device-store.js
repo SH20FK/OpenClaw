@@ -1,13 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname } from "node:path";
-
-async function writeJsonAtomic(filePath, data) {
-  await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
-}
+import { createWriteQueue, loadJsonFile, writeTextAtomic } from "./store-utils.js";
 
 function generatePairCode() {
   return randomBytes(3).toString("hex").toUpperCase();
@@ -44,28 +36,30 @@ export class DeviceStore {
   constructor(filePath) {
     this.filePath = filePath;
     this.state = { devices: [], pairingCodes: [] };
+    this.enqueueWrite = createWriteQueue();
   }
 
   async load() {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      this.state = {
-        devices: Array.isArray(parsed?.devices) ? parsed.devices.map(normalizeDevice) : [],
-        pairingCodes: Array.isArray(parsed?.pairingCodes) ? parsed.pairingCodes.map(normalizePairingCode) : [],
-      };
-      await this.purgeExpiredCodes();
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        await this.save();
-        return;
-      }
-      throw error;
+    const { data, exists, recovered } = await loadJsonFile(this.filePath, {
+      devices: [],
+      pairingCodes: [],
+    });
+
+    this.state = {
+      devices: Array.isArray(data?.devices) ? data.devices.map(normalizeDevice) : [],
+      pairingCodes: Array.isArray(data?.pairingCodes) ? data.pairingCodes.map(normalizePairingCode) : [],
+    };
+
+    await this.purgeExpiredCodes();
+
+    if (!exists || recovered) {
+      await this.save();
     }
   }
 
   async save() {
-    await writeJsonAtomic(this.filePath, this.state);
+    const snapshot = `${JSON.stringify(this.state, null, 2)}\n`;
+    await this.enqueueWrite(() => writeTextAtomic(this.filePath, snapshot));
   }
 
   async purgeExpiredCodes() {
